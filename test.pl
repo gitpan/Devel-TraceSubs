@@ -4,7 +4,7 @@ use warnings;
 use Test;
 $|++;
 
-BEGIN { plan tests => 15 }
+BEGIN { plan tests => 18 }
 
 package particle::quark;
 sub up { print 'up', $/ }
@@ -22,13 +22,14 @@ our @strange = qw/ particle::quark:: /;
 our( $x, $y, $z, @ans);
 
 # start tests
-use Devel::TraceSubs;
+use Devel::TraceSubs 0.02;
 ok(1);
+ok( $Devel::TraceSubs::VERSION, '0.02' );
 
 $x = new Devel::TraceSubs();
 ok( $x, qr/^Devel::TraceSubs=HASH\(/ );
 
-$y = Devel::TraceSubs->new();
+$y = Devel::TraceSubs->new( params => 1 );
 ok( $y, qr/^Devel::TraceSubs=HASH\(/ );
 
 $z = Devel::TraceSubs->new( logger => \&ack );
@@ -46,7 +47,7 @@ $x = Devel::TraceSubs->new( verbose => 0, pre => '>', post => '<',
   close(STDERR);
 
   @ans = $x->trace( 'wave::' );
-  ok( @ans, 0 ); #5 # nonexistant package
+  ok( @ans, 0 ); # nonexistant package
 
   @ans = $x->trace( $x );
   ok( @ans, 0 ); # references not allowed
@@ -64,7 +65,7 @@ $x = Devel::TraceSubs->new( verbose => 0, pre => '>', post => '<',
 }
 
 @ans = $x->trace( 'particle::quark::' );
-ok( join('', sort @ans), 'particle::quark::downparticle::quark::up' ); #10
+ok( join('', sort @ans), 'particle::quark::downparticle::quark::up' );
 ok( @ans, 2 );
 
 @ans = $y->trace( $charmed );
@@ -73,8 +74,22 @@ ok( @ans, 1 );
 
 @ans = $z->trace( @strange );
 ok( join('', sort @ans), 'particle::quark::downparticle::quark::up' );
-ok( @ans, 2 ); #15
+ok( @ans, 2 );
 
+use Data::Dumper;
+my $a = new Devel::TraceSubs();
+{
+  # prevent warnings during test
+  local *OLDERR;
+  open(OLDERR, '>&STDERR') or die 'Cannot dup STDERR';
+  close(STDERR);
+
+  @ans = $a->trace( 'Data::Dumper::' );
+
+  open(STDERR, '>&OLDERR') or die $!;
+}
+ok( @ans, 0 );
+ok( "@ans", '' );
 
 # Results
 my $tests = $Test::ntest - 1;

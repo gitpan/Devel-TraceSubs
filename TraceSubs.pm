@@ -4,7 +4,8 @@ use strict;
 use warnings;
 use Hook::LexWrap;
 use Carp qw( carp croak );
-our $VERSION = 0.01;
+use Data::Dumper;
+our $VERSION = 0.02;
 
 no strict 'refs'; # professional driver on a closed course
 
@@ -15,7 +16,12 @@ sub new { # create a new instance
   ref $arg{wrap} eq 'ARRAY' and $arg{verbose}
     and croak 'ERROR: cannot use verbose mode with wrappers';
 
-  bless { 
+  my @untraceables = qw/ 
+  	Carp:: 
+  	Data::Dumper:: 
+  /;
+
+  my $self = bless { 
     pre => defined $arg{pre} ? $arg{pre} : '>',
     post => defined $arg{post} ? $arg{post} : '<',
     level => defined $arg{level} ? $arg{level} : '~',
@@ -27,13 +33,17 @@ sub new { # create a new instance
         defined &{ $arg{logger} } )
       ? $arg{logger} : \&Carp::carp,
     traced => {},
+	_not_a_trace => {},
 	_presub => undef,
 	_postsub => undef,
   }, $class;
+  $self->untraceables( @untraceables );
+  return $self;
 }
 
 sub trace($;*) { # trace all named subs in passed namespaces
   my( $self ) = ( shift );
+  local $, = ' ';
 
   PACKAGE: for my $pkg ( @_ ) {
 
@@ -52,6 +62,10 @@ sub trace($;*) { # trace all named subs in passed namespaces
     $pkg eq __PACKAGE__ . '::'
       and $self->_warning( "Can't trace myself. This way lies madness." )
       and next PACKAGE;
+
+    exists $self->{_not_a_trace}{ $pkg }
+	  and $self->_warning( "Package untraceable ($pkg)" )
+	  and next PACKAGE;
 
     my( $sym, $glob );
 
@@ -78,6 +92,14 @@ sub trace($;*) { # trace all named subs in passed namespaces
   return wantarray ? @val : "@val";
 }
 
+sub untraceables { # get or set untraceable namespaces
+  my( $self ) = ( shift );
+  @_ and @{ $self->{_not_a_trace} }{@_} = undef;
+  @_ or return wantarray
+    ? keys %{ $self->{_not_a_trace} }
+    : scalar keys %{ $self->{_not_a_trace} }
+}
+
 sub _stack_depth { # compute stack depth
   my @stack;
   while( my $sym = caller(1 + scalar @stack) )
@@ -89,15 +111,32 @@ sub _gen_wrapper { # return a wrapper subroutine
   my( $self ) = ( shift );
   my( $direction, $pkg, $sym, $start ) = @_;
   return sub{
+    local $Data::Dumper::Indent = 0;
+    local $Data::Dumper::Terse = 1;
     $self->{logger}->( 
       ( $self->{wrap}[0] ),
+      ($self->{time} 
+        ? sprintf( "%2d:%2d:%2d ", (localtime)[2,1,0] )
+        : ()
+      ),
       $self->{level} x $self->_stack_depth(),
       $direction, ' ',
       $pkg, $sym, 
-      ( $start && $self->{params} && @_ > 1
-          ? "( '" . join( "', '", @_[0..$#_-1] ) . "' )"
-          : () 
+      ( $self->{params} && @_ > 1 && $start
+        ? "( '" . join( "', '", Data::Dumper::Dumper( @_[0..$#_-1] ) ) . "' )"
+        : () 
       ),
+	  ( $self->{params} && @_ > 1 && ! $start
+        ? ' => '
+          . (ref $_[-1] ne 'Hook::LexWrap::Cleanup'
+            ? (wantarray 
+              ? "( '" . join( "', '", Data::Dumper::Dumper(@$_[-1]) ) . "' )"
+              : Data::Dumper::Dumper( $_[-1] )
+            )
+            : '<void>'
+          )
+	    : ()
+	  ),
       ( $self->{wrap}[1] ),
       $self->{verbose},
     )
@@ -121,13 +160,16 @@ Devel::TraceSubs - Subroutine wrappers for debugging
 
 =head2 VERSION
 
-This document describes version 0.01 of Devel::TraceSubs,
-released 9 June 2002.
+This document describes version 0.02 of Devel::TraceSubs,
+released 22 June 2002.
 
 =head2 SYNOPSIS
 
   package foo;
   sub bar { print "foobar\n" }
+
+  package etc;
+  sub etc { etc::etc() }
 
   package main;
   use Devel::TraceSubs;
@@ -145,6 +187,8 @@ released 9 June 2002.
     wrap => ['<!--', '-->'],
   );
 
+  $dbg->untraceables( 'etc::etc::' );
+
   $dbg->trace(
     'foo::',            # valid
     $pkg,               # valid
@@ -153,11 +197,12 @@ released 9 June 2002.
     $dbg,               # invalid -- references not allowed
     'Debug::SubWrap::', # invalid -- self-reference not allowed
     *main::,            # invalid -- globs not allowed
+    'etc::',            # invalid -- untraceable
   );
 
 =head2 DESCRIPTION
 
-Devel::TraceSubs allows you to track the entry and exit of subroutines in a list of namespaces you specify. It will return the proper stack depth, and display parameters passed. Error checking prevents silent failures (err... the ones i know of.) It takes advantage of Hook::LexWrap's do the dirty work of wrapping the subs and return the proper caller context.
+Devel::TraceSubs allows you to track the entry and exit of subroutines in a list of namespaces you specify. It will return the proper stack depth, and display parameters passed. Error checking prevents silent failures (err... the ones i know of.) It takes advantage of Hook::LexWrap to do the dirty work of wrapping the subs and return the proper caller context.
 
 NOTE: Using verbose mode with wrap mode will generate a compile-time error.
 Don't do that!
@@ -171,23 +216,63 @@ wrap => ['<!--', '-->']. Don't do that, either!
 
 =item new()
 
-Create a new instance of a Devel::TraceSubs object
+Create a new instance of a Devel::TraceSubs object. Below is a description of the parameters, passed in hash format: parameter => value
+
+=over 4
+
+=item pre =>
+
+(SCALAR) Text specifying subroutine entry. Default value is '>'.
+
+=item post =>
+
+(SCALAR) Text specifying subroutine exit. Default value is '<'.
+
+=item level =>
+
+(SCALAR) Text repeated to show the subroutine stack level. Default value is '~'.
+
+=item verbose =>
+
+( 1 | 0 ) Include verbose carp information. Verbose mode and wrap mode must not be enabled at the same time. Default is 0.
+
+=item params =>
+
+( 1 | 0 ) Display subroutine parameters. If enabled, your subroutine parameters and return values will be displayed. Default is 0.
+
+=item wrap =>
+
+(ref 'ARRAY' size 2) Text to wrap all logging info. For instance, if ['<!-- ',' -->'] is specified, logging info will be wrapped in HTML comment tags. Default is ['',''].
+
+=item logger =>
+
+(ref 'CODE') Specify your own logging handler. Default logging is handled by &Carp::carp();
+
+=item time =>
+
+( 1 | 0 ) Display the time during subroutine entry and exit. Default value is 0.
+
+=back
 
 =item trace()
 
-Trace all named subs in passed namespaces
+Trace all named subs in passed namespaces. Call this method with a list of namespaces in which you want to trace subroutine calls. Returns a list of currently traced namespaces in list context, and space seperated string of currently traced namespaces in scalar context.
+
+=item untraceables()
+
+Get or set the list of untraceable namespaces. Call this method with a list of namespaces you're having a problem tracing, and Devel::TraceSubs will happily ignore them. Returns list of untraceable namespaces in list context, and number of untraceable namespaces in scalar context. Default list is 'Carp::', 'Data::Dumper::'.
 
 =item _stack_depth()
 
-Internal use only.
+Internal use only. Calculates current stack depth. Returns list of stack items in list context, and stack depth in scalar context.
 
 =item _gen_wrapper()
 
-Internal use only.
+Internal use only. Generates the subroutine wrappers passed to Hook::LexWrap. Returns a code reference.
 
 =item _warning()
 
-Internal use only.
+Internal use only. Returns a warning message using Carp::carp.
 
 =back
 
@@ -203,6 +288,7 @@ using a Devel:: module in production?
 =head2 AUTHOR
 
 particle E<lt>particle@artfromthemachine.comE<gt>
+Jenda E<lt>Jenda@Krynicky.czE<gt>
 
 =head2 COPYRIGHT
 
@@ -220,7 +306,7 @@ using.
 =head2 CREDITS
 
 Thanks to Jenda at perlmonks.org 
-for the idea to to display passed paramaters, and the patch to implement it. 
+for the idea to to display passed parameters, and the patch to implement it. 
 Thanks to crazyinsomniac at perlmonks.org 
 for the idea to support html (or other) output formats.
 
